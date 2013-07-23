@@ -1,0 +1,323 @@
+#!/usr/bin/python3
+# -*- python -*-
+# Time-stamp: <30-Aug-2012 13:57:37 PDT by rich.pixley@palm.com>
+
+# Copyright (c) 2008-2013 Hewlett-Packard Development Company, L.P.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+##
+# FIXME: I haven't figured out how to do the git submodule stuff using
+# the GitPython library.  The library looks pretty messy, frankly, but
+# I don't see any other plausible alternatives.  So for now I'm just
+# doing shell calls.  Even if I did find a way to use the library,
+# there's an open question of how to get it onto the current machine
+# so that it can be used.
+
+from __future__ import with_statement, print_function, unicode_literals, absolute_import, division
+
+import argparse
+import errno
+import logging
+import os
+import subprocess
+import sys
+
+logger = logging.getLogger(__name__)
+
+submodules = {}
+
+def echo_check_call(todo, verbosity, cwd=None):
+   if verbosity:
+      cmd = 'set -x; ' + todo
+   else:
+      cmd = todo
+   
+   return subprocess.check_call(cmd,
+                                stdout=sys.stdout,
+                                stderr=sys.stderr,
+                                shell=True,
+                                cwd=cwd)
+
+def force_submodule(submodule, verbosity, branch='submodule'):
+    global submodules
+
+    if submodule not in submodules:
+        # luckily, these commands are idempotent.
+        echo_check_call('git submodule init {}'.format(submodule), verbosity)
+        echo_check_call('git submodule update {}'.format(submodule), verbosity)
+
+        if branch != 'submodule':
+           echo_check_call('git checkout {}'.format(branch), verbosity, cwd=submodule)
+
+        submodules[submodule] = branch
+
+# Essentially, mcf parses options, creates mcf.status, and runs mcf.status.
+
+def process_file(ifile, ofile, replacements):
+    statusfilename = ifile
+    statusfile = open(statusfilename, 'r')
+    status = statusfile.read()
+    statusfile.close()
+
+    for i, j in replacements:
+        status = status.replace(i, j)
+
+    statusfile = open(ofile, 'w')
+    statusfile.write(status)
+    statusfile.close()
+    return
+
+def getopts():
+    parser = argparse.ArgumentParser(description='multiple configuration')
+    
+    general = parser.add_argument_group('General Options')
+
+    verbosity = general.add_mutually_exclusive_group()
+
+    verbosity.add_argument('-s', '--silent', dest='verbose',
+                         action='store_false', default=False,
+                         help='work silently')
+
+    verbosity.add_argument('-v', '--verbose', dest='verbose',
+                       action='store_true', default=False,
+                       help='work verbosely')
+
+    general.add_argument('-P', '--primary', action='store_true', help='select primary devices')
+    general.add_argument('-S', '--secondary', action='store_true', help='select secondary devices')
+    general.add_argument('-x', '--trace', action='store_true', help='trace')
+
+    variations = parser.add_argument_group('Variations on a Theme')
+
+    variations.add_argument('-p', '--enable-parallel-make', dest='parallel_make', type=int, default=1,
+                            help='maximum number of parallel tasks each submake of bitbake should spawn (default: 1)')
+
+    variations.add_argument('-b', '--enable-bb-number-threads', dest='bb_number_threads', type=int, default=1,
+                            help='maximum number of bitbake tasks to spawn (default: 1)')
+
+    partitions = parser.add_argument_group('Source Partitions')
+
+    partitions.add_argument('--disable-bitbake', dest='bitbake', action='store_const', const=False,
+                            default='submodule', help='do not check out bitbake layer (default: False)')
+
+    partitions.add_argument('-B', '--enable-bitbake', dest='bitbake', default='submodule',
+                            help='ref to use for bitbake (default: submodule)')
+
+    partitions.add_argument('-C', '--disable-oecore', dest='oecore', action='store_const', const=False,
+                            default='submodule', help='do not check out openembedded-core layer (default: False)')
+
+    partitions.add_argument('-D', '--enable-oecore', dest='oecore', default='submodule',
+                            help='ref to use for openembedded-core (default: submodule)')
+
+    partitions.add_argument('-U', '--disable-webos', dest='webos', action='store_const', const=False,
+                            default='submodule', help='do not check out meta-webos layer (default: False)')
+
+    partitions.add_argument('-W', '--enable-webos', dest='webos', default='submodule',
+                            help='ref to use for meta-webos (default: submodule)')
+
+    partitions.add_argument('-M', '--disable-metaoe', '--disable-meta-oe', dest='metaoe', action='store_const', const=False,
+                            default='submodule', help='do not check out meta-oe layer (default: False)')
+
+    partitions.add_argument('-N', '--enable-metaoe', '--enable-meta-oe', dest='metaoe', default='submodule',
+                            help = 'ref from which to check out meta-oe (default: submodule)')
+    
+    mirrors = parser.add_argument_group('Mirrors and such')
+
+    network = mirrors.add_mutually_exclusive_group()
+
+    network.add_argument('--disable-network', dest='network', action='store_false', default=True,
+                         help='disable fetching through the network (default: False)')
+
+    network.add_argument('--enable-network', dest='network', action='store_true', default=True,
+                         help='enable fetching through the network (default: True)')
+
+    # use shorter form without --enable prefix, --disable variant doesn't make sense, because it's disabled by default
+    # option in autoconf's configure.ac is named --enable-sstatemirror (because it's created with AC_ARG_ENABLE macro)
+    mirrors.add_argument('--sstatemirror', dest='sstatemirror', action='append',
+                         help='set sstatemirror to specified URL, repeat this option if you want multiple sstate mirrors (default: None)')
+    
+    premirrorurl = mirrors.add_mutually_exclusive_group()
+    default_premirror = 'http://downloads.yoctoproject.org/mirror/sources'
+    premirrorurl.add_argument('--enable-default-premirror', dest='premirror', action='store_const', const=default_premirror, default="",
+                              help='enable default premirror URL (default: False)')
+    # allow shorter form without --enable prefix, --disable variant doesn't make sense, because it's disabled by default
+    # but keep also variant with --enable prefix so that we don't have to update config in existing jenkins jobs
+    # option in autoconf's configure.ac is named --enable-premirror (because it's created with AC_ARG_ENABLE macro)
+    premirrorurl.add_argument('--premirror', '--enable-premirror', dest='premirror', default='',
+                              help='set premirror to specified URL (default: None)')
+
+    premirroronly = mirrors.add_mutually_exclusive_group()
+    premirroronly.add_argument('--disable-fetch-premirror-only', dest='fetchpremirroronly', action='store_false', default=False,
+                               help='disable fetching through the network (default: False)')
+
+    premirroronly.add_argument('--enable-fetch-premirror-only', dest='fetchpremirroronly', action='store_true', default=False,
+                               help='enable fetching through the network (default: True)')
+
+    tarballs = mirrors.add_mutually_exclusive_group()
+    tarballs.add_argument('--disable-generate-mirror-tarballs', dest='generatemirrortarballs', action='store_false', default=False,
+                          help='disable tarball generation of fetched components (default: True)')
+
+    tarballs.add_argument('--enable-generate-mirror-tarballs', dest='generatemirrortarballs', action='store_true', default=False,
+                          help='generate tarballs suitable for mirroring (default: False)')
+
+    private = mirrors.add_mutually_exclusive_group()
+    private.add_argument('--disable-private-internal-component-mirror', dest='privateinternalcomponentmirror', action='store_false',
+                      default=False, help='disable the private internal component mirror (default: disabled)')
+
+    private.add_argument('--enable-private-internal-component-mirror', dest='privateinternalcomponentmirror', action='store_true',
+                      default=False, help='enable the private internal component mirror (default: disabled)')
+
+    buildhistory = parser.add_argument_group('Buildhistory')
+
+    buildhistory1 = buildhistory.add_mutually_exclusive_group()
+
+    buildhistory1.add_argument('--disable-buildhistory', dest='buildhistory', action='store_false', default=True,
+                              help='disable buildhistory functionality (default: False)')
+
+    buildhistory1.add_argument('--enable-buildhistory', dest='buildhistory', action='store_true', default=True,
+                              help='enable buildhistory functionality (default: True)')
+    
+    buildhistory.add_argument('--enable-buildhistoryauthor', dest='buildhistoryauthor', default='', help='specify name and email used in buildhistory git commits (default: none, will use author from git global config)')
+    
+    parser.add_argument('machines', nargs='*')
+
+    return parser.parse_args()
+
+if __name__ == '__main__':
+   # NB. The exec done by mcf.status causes argv[0] to be an absolute pathname
+    progname = sys.argv[0]
+
+    options = getopts()
+
+    # Update git submodule URLs
+    echo_check_call('git submodule sync', options.verbose)
+
+    if options.primary or options.secondary:
+        force_submodule('meta-webos', options.verbose, options.webos)
+        with open(os.path.join(os.path.dirname(progname), 'meta-webos', 'conf', 'devices'), 'r') as f:
+            lines = [l.split() for l in f]
+
+        options.machines.extend([x[0] for x in lines if ((options.primary and (x[1] == 'primary'))
+                                                         or (options.secondary and (x[1] == 'secondary')))])
+    if len(options.machines) == 0:
+        options.machines += ['qemux86']
+        #parser.error('at least one MACHINE argument is required')
+
+    if options.trace:
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.DEBUG)
+        f = logging.Formatter('%(asctime)s %(levelname)s %(name)s %(message)s', datefmt='%Y-%m-%dT%H:%M:%S')
+
+        s = logging.StreamHandler()
+        s.setLevel('DEBUG')
+
+        s.setFormatter(f)
+        logging.getLogger('').addHandler(s)
+
+    # Allow ../mcf to work.
+    srcdir = os.path.dirname(progname)
+    if not os.path.isabs(srcdir):
+        lower_dirname = os.path.join('..', srcdir)
+    else:
+        lower_dirname = srcdir
+
+    configure = os.path.join(lower_dirname, 'configure')
+
+    # read status template, process, write
+    
+    files = [[os.path.join(srcdir, 'build-templates', 'mcf-status.in'), 'mcf.status'],
+             [os.path.join(srcdir, 'Makefile.in'), 'Makefile']]
+
+    cpu_count = 0
+    if options.bb_number_threads == 0 or options.parallel_make == 0:
+        with open('/proc/cpuinfo', 'r') as f:
+            for line in f:
+                if line.find('processor') != -1:
+                    cpu_count += 1
+
+    if options.bb_number_threads == 0:
+        options.bb_number_threads = cpu_count
+
+    if options.parallel_make == 0:
+        options.parallel_make = cpu_count
+
+    replacements = [
+        ['@bb_number_threads@', '{}'.format(options.bb_number_threads)],
+        ['@configure@', configure],
+        ['@machines@', ' '.join(options.machines)],
+        ['@machines_only@', ' '.join([i.split(':')[0] for i in options.machines])],
+        ['@parallel_make@', '{}'.format(options.parallel_make)],
+        ['@premirror@', options.premirror],
+        ['@sstatemirror@', '"{}"'.format(' '.join(options.sstatemirror) if options.sstatemirror else '')],
+        ['@bitbake@', '--enable-bitbake={}'.format(options.bitbake) if options.bitbake else '--disable-bitbake'],
+        ['@oecore@', '--enable-oecore={}'.format(options.oecore) if options.oecore else '--disable-oecore'],
+        ['@metaoe@', '--enable-metaoe={}'.format(options.metaoe) if options.metaoe else '--disable-metaoe'],
+        ['@webos@', '--enable-webos={}'.format(options.webos) if options.webos else '--disable-webos'],
+        ['@buildhistory@', '--{}-buildhistory'.format('enable' if options.buildhistory else 'disable')],
+        ['@buildhistoryauthor@', options.buildhistoryauthor],
+        ['@network@', '--{}-network'.format('enable' if options.network else 'disable')],
+        ['@fetchpremirroronly@', '--{}-fetch-premirror-only'.format('enable' if options.fetchpremirroronly else 'disable')],
+        ['@generatemirrortarballs@', '--{}-generate-mirror-tarballs'.format('enable'
+                                                                            if options.generatemirrortarballs else 'disable')],
+        ['@privateinternalcomponentmirror@', '--{}-private-internal-component-mirror'.format('enable'
+                                                                            if options.privateinternalcomponentmirror else 'disable')],
+        ['@prog@', progname],
+        ['@srcdir@', srcdir],
+        ]
+
+    for i, j in files:
+        process_file(i, j, replacements)
+
+    echo_check_call('/bin/chmod a+x mcf.status', options.verbose)
+
+    for machine in options.machines:
+        logger.info('Configuring in BUILD-{}'.format(machine))
+        logger.info('configure is {}'.format(configure))
+
+        cmd = '([ -d BUILD-{} ] || mkdir BUILD-{})'.format(machine, machine)
+        cmd += ' && (cd BUILD-{} && PWD= @configure@ \
+           --enable-bb-number-threads=@bb_number_threads@ \
+           --enable-parallel-make=@parallel_make@ \
+           --enable-premirror=@premirror@ \
+           --enable-sstatemirror=@sstatemirror@ \
+           @bitbake@ \
+           @oecore@ \
+           @webos@ \
+           @metaoe@ \
+           @buildhistory@ \
+           --enable-buildhistoryauthor="@buildhistoryauthor@" \
+           @network@ \
+           @fetchpremirroronly@ \
+           @privateinternalcomponentmirror@ \
+           @generatemirrortarballs@ \
+           --build=ubuntu \
+           --host={})'.format(machine, machine)
+
+        for i, j in replacements:
+            cmd = cmd.replace(i, j)
+
+        echo_check_call(cmd, options.verbose)
+
+        if options.bitbake:
+            force_submodule('bitbake', options.verbose, options.bitbake)
+
+        if options.oecore:
+            force_submodule('openembedded-core', options.verbose, options.oecore)
+
+        if options.metaoe:
+            force_submodule('meta-openembedded', options.verbose, branch=options.metaoe)
+
+        if options.webos:
+            force_submodule('meta-webos', options.verbose, branch=options.webos)
+
+        logger.info('Done.\n')
