@@ -141,10 +141,10 @@ AC_MSG_CHECKING([private_internal_component_mirror])
 AC_ARG_ENABLE([private_internal_component_mirror], [AS_HELP_STRING([--enable-private-internal-component-mirror],
 		     enable private internal component mirror (default: "False"))],
 		     [case "$enableval" in
-yes) enable_privateinternalcomponentmirror="git://github-mirror.palm.com/openwebos" ;;
-no) enable_privateinternalcomponentmirror="git://github.com/openwebos" ;;
+yes) enable_privateinternalcomponentmirror="git://github.com/JeongMinCha" ;;
+no) enable_privateinternalcomponentmirror="git://github.com/JeongMinCha" ;;
 esac],
-		     [enable_privateinternalcomponentmirror="git://github.com/openwebos"])
+		     [enable_privateinternalcomponentmirror="git://github.com/JeongMinCha"])
 AC_SUBST([privateinternalcomponentmirror], [$enable_privateinternalcomponentmirror])
 AC_MSG_RESULT([$enableval])
 
