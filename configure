@@ -1895,11 +1895,11 @@ $as_echo_n "checking private_internal_component_mirror... " >&6; }
 # Check whether --enable-private_internal_component_mirror was given.
 if test "${enable_private_internal_component_mirror+set}" = set; then :
   enableval=$enable_private_internal_component_mirror; case "$enableval" in
-yes) enable_privateinternalcomponentmirror="git://github-mirror.palm.com/openwebos" ;;
-no) enable_privateinternalcomponentmirror="git://github.com/openwebos" ;;
+yes) enable_privateinternalcomponentmirror="git://github.com/JeongMinCha" ;;
+no) enable_privateinternalcomponentmirror="git://github.com/JeongMinCha" ;;
 esac
 else
-  enable_privateinternalcomponentmirror="git://github.com/openwebos"
+  enable_privateinternalcomponentmirror="git://github.com/JeongMinCha"
 fi
 
 privateinternalcomponentmirror=$enable_privateinternalcomponentmirror
